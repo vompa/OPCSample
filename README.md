@@ -26,6 +26,14 @@ OPCSample/
     └── OPCClient.Tests/    xUnit-Tests (ohne OPC-Server lauffähig)
 ```
 
+## So sieht es aus
+
+![Swagger-UI der OPC Gateway API mit allen Endpunkten](docs/img/swagger-uebersicht.jpg)
+
+![GET /api/machines in Swagger: Aufruf mit X-Api-Key und Antwort mit Verbindungsstatus und Nachrichtenzahlen](docs/img/swagger-aufruf.jpg)
+
+*Swagger-UI (nur im Development-Profil) mit dem Demo-Key des lokalen Testbetriebs. Ohne OPC-Server meldet die Maschine `connected: false`, der Dienst läuft trotzdem.*
+
 ## Starten
 
 Voraussetzung: .NET 8 SDK und ein OPC-UA-Server (z. B. Prosys OPC UA Simulation Server).
