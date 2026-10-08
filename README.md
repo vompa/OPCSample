@@ -1,4 +1,6 @@
 # OPCSample
+[![CI](https://github.com/vompa/OPCSample/actions/workflows/ci.yml/badge.svg)](https://github.com/vompa/OPCSample/actions/workflows/ci.yml)
+
 
 OPC-UA-Client in C# (.NET 8) mit Rx.NET und persistenter LIFO-Queue (SQLite): Wertänderungen von Maschinen werden zuverlässig gespeichert und mit Retry und Backoff an einen Handler (Log oder Webhook) zugestellt.
 
