@@ -56,6 +56,41 @@ Beim Start im Development-Profil sind zwei Demo-Keys konfiguriert (`appsettings.
 
 OPC-UA-Server → `MonitoredItem.Notification` → Rx-Subject (`DistinctUntilChanged`) → SQLite (Stack/LIFO) → Worker pro Maschine → Handler (mit Timeout und Retry)
 
+```mermaid
+flowchart TB
+    server["OPC-UA-Server<br/>(Maschine)"]
+    agent["Clients und KI-Agenten<br/>(Postman, Claude, ...)"]
+    sink["Ziel<br/>Log oder Webhook<br/>(Idempotency-Key)"]
+
+    subgraph client["OPCClient"]
+        direction TB
+        sub["Subscription<br/>MonitoredItems"]
+        rx["Rx-Stream<br/>DistinctUntilChanged"]
+        store[("SQLite<br/>persistenter Stack (LIFO)")]
+        worker["Worker pro Maschine<br/>neueste Nachricht zuerst"]
+        handler["Handler<br/>Timeout, Retry mit Backoff"]
+        api["REST-API und MCP<br/>API-Key, Rollen"]
+        keep["Aufräumen<br/>erledigte nach 7 Tagen"]
+        sub --> rx --> store --> worker --> handler
+        handler -- "Done / Failed" --> store
+        api -- "lesen, retry" --> store
+        keep -.-> store
+    end
+
+    server -- "Wertänderung" --> sub
+    handler --> sink
+    agent -- "HTTP + API-Key" --> api
+
+    classDef ext fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
+    classDef flow fill:#ecfdf5,stroke:#10b981,color:#064e3b
+    classDef security fill:#fff7ed,stroke:#f97316,color:#7c2d12
+    classDef data fill:#f1f5f9,stroke:#64748b,color:#0f172a
+    class server,agent,sink ext
+    class sub,rx,worker,handler flow
+    class api,keep security
+    class store data
+```
+
 - Neueste Nachricht wird zuerst verarbeitet (LIFO).
 - Nach einem Absturz werden Nachrichten im Zustand "in Arbeit" wieder auf "offen" gesetzt (at-least-once, der Handler sollte idempotent sein).
 - Pro Nachricht maximal 3 Versuche mit exponentiellem Backoff (1 s, 2 s, … bis 30 s, mit Jitter), danach Zustand `Failed` (per `POST /api/messages/{id}/retry` erneut einplanen).
