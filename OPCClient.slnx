@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/Client/" />
+  <Folder Name="/Tests/">
+    <Project Path="Tests/OPCClient.Tests/OPCClient.Tests.csproj" />
+  </Folder>
+  <Project Path="Client/OPCClient/OPCClient.csproj" />
+</Solution>

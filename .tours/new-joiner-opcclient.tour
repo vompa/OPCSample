@@ -1,0 +1,167 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "OPCClient – Onboarding",
+  "description": "Vom Programmstart über OPC-Subscription und SQLite-Stack bis zur REST-API und zum MCP-Zugang für KI-Agenten: der Weg einer Wertänderung durch den OPCClient.",
+  "steps": [
+    {
+      "file": "Client/OPCClient/Program.cs",
+      "line": 20,
+      "title": "Einstiegspunkt",
+      "description": "Hier startet ein normaler ASP.NET-Core-Webserver (.NET 8) mit Serilog. Logging geht in die Konsole und nach `logs/opc-<Datum>.log`.\n\nDie Dependency Injection enthält die Bausteine, die alles tragen: `SqliteMessageStore` (Persistenz), `MachineRegistry` (laufende Maschinen), den `OpcHostedService` (startet die OPC-Verbindungen), den Nachrichten-Handler, die Authentifizierung und den MCP-Zugang.\n\nGotcha: `UseUrls` hat Vorrang vor den Ports in `launchSettings.json`. Der Dienst lauscht standardmäßig auf Port 5080.\n\nZu Beginn der Datei steht außerdem der Hilfsbefehl `dotnet run -- hash-key <key>`, der den Hash für die Konfiguration eines API-Keys ausgibt."
+    },
+    {
+      "file": "Client/OPCClient/Program.cs",
+      "line": 37,
+      "title": "Der Hosted Service wird registriert",
+      "description": "`OpcHostedService` läuft beim Start des Webservers an und beim Beenden wieder aus. Er liest die Maschinen aus `appsettings.json` (`Opc:Machines`). Ab hier bestimmt die Konfiguration, was überwacht wird."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcHostedService.cs",
+      "line": 32,
+      "title": "Eine Maschine pro Konfigurationseintrag",
+      "description": "Für jeden Eintrag wird eine `OpcMachine` erzeugt, gestartet und in der Registry abgelegt. `StartAsync` blockiert nicht auf die Verbindung: Der OPC-Server darf fehlen, der Webserver startet trotzdem.\n\nDer Callback für die Verbindung bekommt ein `CancellationToken`, damit ein Herunterfahren einen laufenden Verbindungsaufbau abbrechen kann.\n\nGotcha: Eine Exception beim Start (z. B. ungültige NodeId) wird nur geloggt, die Maschine wird dann nicht registriert."
+    },
+    {
+      "file": "Client/OPCClient/Opc/MessageHandlers.cs",
+      "line": 10,
+      "title": "Hier kommt deine Fachlogik hin: IMessageHandler",
+      "description": "Jede Nachricht geht durch einen `IMessageHandler`. Standard ist der `LoggingMessageHandler`; mit `Opc:Sink:Type = Webhook` wird sie stattdessen per HTTP weitergeleitet.\n\nRegeln für jeden Handler: Das Token weiterreichen, sonst greift das Timeout nicht. Eine Exception oder ein Timeout löst einen Retry aus. Der Handler muss idempotent sein, weil dieselbe Nachricht mehrfach ankommen kann."
+    },
+    {
+      "file": "Client/OPCClient/Opc/MessageHandlers.cs",
+      "line": 71,
+      "title": "Webhook mit Idempotency-Key",
+      "description": "Jede Anfrage trägt den Header `Idempotency-Key: <Maschine>-<Nachrichten-Id>`. Die Id ändert sich bei Wiederholungen nicht, so kann der Empfänger Duplikate erkennen (die Zustellung ist at-least-once).\n\nEin Statuscode außerhalb von 2xx wirft eine Exception und löst damit den normalen Retry aus. Die URL wird beim Start geprüft: Nur HTTPS, HTTP ist ausschließlich für localhost erlaubt."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 13,
+      "title": "OpcMachine: das Herzstück",
+      "description": "Eine Maschine = eine OPC-UA-Session + ein Rx-Stream + ein persistenter Stack + ein Worker. Drei Aufgaben laufen unabhängig voneinander: `ConnectLoop` (Verbindung), die Rx-Pipeline (Änderungen speichern) und `ProcessLoop` (Nachrichten abarbeiten).\n\nDas Design trennt bewusst Verbindung und Verarbeitung: Offene Nachrichten aus der DB werden auch ohne Server weiter verarbeitet. Die Tests nutzen genau das (siehe letzter Schritt)."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 57,
+      "title": "Start: Validieren, Pipeline, Backlog",
+      "description": "Erst werden alle NodeIds geparst, damit Konfigurationsfehler sofort auffallen und nicht endlos als Verbindungsproblem wiederholt werden.\n\nDann wird die Rx-Pipeline aufgebaut, offene Nachrichten aus der DB werden wieder eingeplant, und Worker und Connector starten im Hintergrund. Die Methode kehrt sofort zurück."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 90,
+      "title": "ConnectLoop: Verbindung mit Wiederholung",
+      "description": "Schlägt der Verbindungsaufbau fehl, wird alle `ConnectRetryInterval` (10 s) neu versucht, bis es klappt. Eine halb aufgebaute Session wird dabei sauber geschlossen.\n\nGotcha: Dispose kann während des Verbindens beginnen. Deshalb wird nach `AttachAsync` das Token geprüft, und eine zu spät fertige Session wird wieder abgebaut. Ohne diese Prüfung würde sie unbemerkt weiterlaufen."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 149,
+      "title": "Subscription und MonitoredItems",
+      "description": "Für jede konfigurierte Variable wird ein `MonitoredItem` angelegt. Bei jeder Änderung des Servers liefert die Notification einen `OpcMessage` in den Rx-Stream. Fehlt der Zeitstempel der Quelle, wird die aktuelle UTC-Zeit genommen.\n\nGotcha: Ein MonitoredItem mit unbekannter, aber syntaktisch gültiger NodeId wird vom Server erst beim Anlegen abgelehnt, nicht beim Parsen."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 64,
+      "title": "Rx: nur echte Änderungen",
+      "description": "`DistinctUntilChanged` verwirft aufeinanderfolgende Nachrichten mit gleichem Namen und Wert. Erst danach wird `Push` aufgerufen und die Nachricht in SQLite gespeichert.\n\nGotcha: Der Standardvergleich behandelt Arrays per Referenz, jede Notification mit gleichem Inhalt gälte dann als Änderung. Deshalb gibt es den `MessageValueComparer`, der Arrays inhaltlich vergleicht."
+    },
+    {
+      "file": "Client/OPCClient/Storage/SqliteMessageStore.cs",
+      "line": 90,
+      "title": "Der persistente Stack (LIFO)",
+      "description": "`TryPop` holt die Nachricht mit der höchsten Id, also die neueste zuerst, und setzt sie atomar auf `Processing`. Status: `Pending → Processing → Done` oder `Failed` (siehe `MessageState` in `Models.cs`).\n\nGotcha: Beim Start werden Nachrichten im Status `Processing` wieder auf `Pending` gesetzt, damit nach einem Absturz nichts hängen bleibt. Die Datenbank läuft im WAL-Modus."
+    },
+    {
+      "file": "Client/OPCClient/Storage/SqliteMessageStore.cs",
+      "line": 45,
+      "title": "Werttypen nur aus einer Allowlist",
+      "description": "Der Typname eines gespeicherten Werts steht in der Datenbank. Er wird nie blind mit `Type.GetType` aufgelöst, sondern nur gegen eine feste Liste einfacher Typen (und deren Arrays) geprüft. Alles andere kommt als `JsonElement` an."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 199,
+      "title": "ProcessLoop: Handler, Timeout, Retry",
+      "description": "Der Worker wartet auf ein Signal, holt die neueste Nachricht und ruft den Handler mit einem Timeout (`HandlerTimeout`, Standard 5 s) auf. Bei Erfolg: `Complete`. Bei Fehler oder Timeout: `Fail`, und bis zu `MaxAttempts` (3) Versuche, danach `Failed`.\n\nGotcha: Beim Herunterfahren bleibt die Nachricht offen und wird beim nächsten Start verarbeitet. Dafür gibt der Store sie mit `Release` zurück, ohne den Versuch zu zählen. Früher verbrauchte jedes Herunterfahren einen der drei Versuche."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 244,
+      "title": "Retry mit Backoff",
+      "description": "Nach einem Fehler wird der Worker nicht sofort, sondern nach einer Wartezeit wieder geweckt. Der Worker blockiert dabei nicht: Nachrichten anderer Variablen laufen weiter.\n\nDie Wartezeit kommt aus `RetryBackoff`: 1 s, 2 s, 4 s … höchstens 30 s, mit ±20 % Jitter, damit nicht alle Maschinen im Gleichschritt gegen einen angeschlagenen Zielservice anrennen."
+    },
+    {
+      "file": "Client/OPCClient/Opc/RetryBackoff.cs",
+      "line": 17,
+      "title": "RetryBackoff.Delay",
+      "description": "Reine Funktion ohne Zufall (der Jitter wird als Parameter übergeben), deshalb direkt testbar. `Next` ist die Variante mit Zufall für den Betrieb."
+    },
+    {
+      "file": "Client/OPCClient/Storage/RetentionService.cs",
+      "line": 20,
+      "title": "Aufräumen",
+      "description": "Ein Hintergrunddienst löscht regelmäßig erledigte Nachrichten, die älter als `Retention:DoneRetentionDays` sind (Standard 7 Tage). Ohne ihn würde die Datenbank unbegrenzt wachsen.\n\n`Failed`-Nachrichten und offene bleiben unberührt, sie werden für das Retry gebraucht."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcMachine.cs",
+      "line": 252,
+      "title": "Reconnect im laufenden Betrieb",
+      "description": "Meldet der KeepAlive einen Fehler, übernimmt der `SessionReconnectHandler` und baut die Verbindung in 5-Sekunden-Schritten wieder auf. Währenddessen läuft der Worker weiter.\n\nDer Telemetry-Kontext kommt aus `OpcSessionFactory.Telemetry`."
+    },
+    {
+      "file": "Client/OPCClient/Opc/OpcSessionFactory.cs",
+      "line": 37,
+      "title": "OPC-Sicherheit: konfigurierbar",
+      "description": "`Machines[].UseSecurity` wählt den sichersten vom Server angebotenen Endpoint (Signieren und Verschlüsseln). Der Standard ist weiterhin `false`; dann schreibt der Dienst eine Warnung ins Log.\n\nServerzertifikate werden nicht mehr blind akzeptiert (`Opc:AutoAcceptUntrustedCertificates` ist standardmäßig `false`). Abgelehnte landen mit Thumbprint im Log und in `pki/rejected`.\n\nHinweis: Die verschlüsselte Verbindung ist gegen keinen echten OPC-Server getestet."
+    },
+    {
+      "file": "Client/OPCClient/Program.cs",
+      "line": 60,
+      "title": "Authentifizierung: fail closed",
+      "description": "Ohne konfigurierten API-Key startet der Dienst nicht. Die Fallback-Policy verlangt für jeden Endpunkt eine Anmeldung, nur `/api/health` ist ausdrücklich anonym. Wer einen neuen Endpunkt vergisst abzusichern, hat ihn trotzdem geschützt.\n\nDie Rolle `writer` ist als Policy hinterlegt und schützt alles, was Zustände ändert. Danach folgt das Rate Limit pro Client."
+    },
+    {
+      "file": "Client/OPCClient/Security/ApiKeyAuthenticationHandler.cs",
+      "line": 41,
+      "title": "Key-Prüfung in konstanter Zeit",
+      "description": "Gespeichert ist nur der SHA-256-Hash. Verglichen wird mit `FixedTimeEquals` und ohne frühen Abbruch der Schleife, damit weder das Timing noch die Position eines Treffers etwas über gültige Keys verrät.\n\nDer Key kann als `X-Api-Key` oder als `Authorization: Bearer` kommen. Name und Rolle landen als Claims im Principal."
+    },
+    {
+      "file": "Client/OPCClient/Api/OpcApi.cs",
+      "line": 10,
+      "title": "REST-API und Swagger",
+      "description": "Die API unter `/api` zeigt Maschinen mit Verbindungsstatus (`/machines`), filterbare Nachrichten (`/messages`) und den aktuellsten Wert je Variable. Swagger-UI gibt es nur im Development-Profil: `http://localhost:5080/swagger`.\n\n`/api/health` ist öffentlich und liefert nur `ok` oder `degraded`, bewusst ohne Details und immer mit HTTP 200: Ein fehlender OPC-Server soll den Dienst nicht neu starten lassen."
+    },
+    {
+      "file": "Client/OPCClient/Api/OpcApi.cs",
+      "line": 37,
+      "title": "Fehlgeschlagene Nachricht erneut einplanen",
+      "description": "`POST /api/messages/{id}/retry` setzt eine `Failed`-Nachricht über `Requeue` zurück auf `Pending` und weckt den Worker der zugehörigen Maschine mit `Wake()`. Das geht nur mit der Rolle `writer`."
+    },
+    {
+      "file": "Client/OPCClient/Program.cs",
+      "line": 52,
+      "title": "MCP: Zugang für KI-Agenten",
+      "description": "Unter `/mcp` steht ein MCP-Endpunkt bereit. Er läuft stateless im selben Host und nutzt dieselbe Authentifizierung wie die REST-API, es gibt keinen zweiten Zugangsweg."
+    },
+    {
+      "file": "Client/OPCClient/Mcp/OpcTools.cs",
+      "line": 23,
+      "title": "Die Tools",
+      "description": "Drei lesende Tools (`list_machines`, `get_latest_values`, `query_messages`) und ein einziges schreibendes (`retry_message`). Die Beschreibungen sind für das Modell geschrieben, nicht für Menschen.\n\nBewusst gibt es kein Tool, das Werte auf der Maschine schreibt. `query_messages` ist auf 100 Treffer pro Seite begrenzt, Fehler kommen als Klartext zurück, damit der Agent sich korrigieren kann."
+    },
+    {
+      "file": "Client/OPCClient/Mcp/OpcTools.cs",
+      "line": 80,
+      "title": "Schreibrecht pro Tool-Aufruf",
+      "description": "`retry_message` prüft die Rolle zusätzlich zur Policy noch einmal im Tool. Jeder Aufruf wird mit Client-Name im Audit-Log festgehalten.\n\nBeachte: Werte und Variablennamen kommen von der Maschine. Für den Agenten sind sie nicht vertrauenswürdiger Text."
+    },
+    {
+      "file": "Tests/OPCClient.Tests/OpcMachineProcessingTests.cs",
+      "line": 12,
+      "title": "Tests ohne OPC-Server",
+      "description": "Die Verbindung schlägt in diesen Tests absichtlich fehl, die Verarbeitung der Datenbank-Nachrichten läuft trotzdem. So lassen sich LIFO, Retry, Timeout und Shutdown prüfen, ohne einen Server zu starten.\n\nWeitere Bausteine: `AccessControlTests` (401/403, Health) und `McpEndpointTests` (echter MCP-Client gegen den Dienst im Speicher). Ausführen mit `dotnet test OPCClient.slnx`."
+    },
+    {
+      "title": "Wie geht es weiter?",
+      "description": "Du kennst jetzt den Weg einer Wertänderung: OPC-Server → Subscription → Rx-Filter → SQLite-Stack → Worker → Handler, und die Wege nach außen: REST-API und MCP, beide hinter API-Key und Rollen.\n\nNächste Schritte: Wähle über `Opc:Sink` deinen Ausgang (oder implementiere `IMessageHandler`), trage deine Maschinen in `appsettings.json` ein und starte den Dienst. Er läuft auch ohne OPC-Server."
+    }
+  ]
+}

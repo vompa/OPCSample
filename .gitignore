@@ -1,0 +1,19 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+.vscode/
+*.log
+
+## Laufzeitdaten des Clients
+*.db
+*.db-wal
+*.db-shm
+logs/
+pki/
+
+## Absturzdateien der Shell
+*.stackdump

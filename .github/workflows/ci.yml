@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore OPCClient.slnx
+      - name: Build (Warnungen sind Fehler)
+        run: dotnet build OPCClient.slnx --no-restore -c Release
+      - name: Test
+        run: dotnet test OPCClient.slnx --no-build -c Release
+      - name: Pakete auf bekannte Schwachstellen prüfen
+        run: dotnet list OPCClient.slnx package --vulnerable --include-transitive
