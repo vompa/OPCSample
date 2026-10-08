@@ -88,3 +88,7 @@ dotnet test OPCClient.slnx
 ```
 
 Die Tests laufen ohne OPC-Server (Speicher, LIFO, Retry/Backoff, Timeout, Shutdown, Zugriffsschutz, MCP). Die CI baut mit `TreatWarningsAsErrors` und prüft die Pakete auf bekannte Schwachstellen.
+
+## Lizenz
+
+[MIT](LICENSE)
