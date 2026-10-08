@@ -1,6 +1,13 @@
 # OPCSample
 
-Beispiel für einen OPC-UA-Client in C# mit Rx.NET, persistenter LIFO-Queue (SQLite), Serilog und integrierter REST-API mit Swagger.
+OPC-UA-Client in C# (.NET 8) mit Rx.NET und persistenter LIFO-Queue (SQLite): Wertänderungen von Maschinen werden zuverlässig gespeichert und mit Retry und Backoff an einen Handler (Log oder Webhook) zugestellt.
+
+Auf einen Blick:
+
+- **Zuverlässig:** At-least-once-Zustellung mit stabilem `Idempotency-Key`, neustartfest, läuft auch ohne erreichbaren OPC-Server.
+- **Zugriff:** REST-API mit Swagger und ein MCP-Endpunkt für KI-Agenten, beide hinter API-Key mit den Rollen `reader` und `writer`.
+- **Getestet:** Tests ohne OPC-Server (Reihenfolge, Retry, Timeout, Shutdown, Zugriffsschutz, MCP), CI mit Warnungen als Fehler.
+- **Ehrlich:** Die verschlüsselte OPC-Verbindung (`UseSecurity`) ist gegen keinen echten Server getestet.
 
 ## Struktur
 
