@@ -31,13 +31,14 @@ public sealed class OpcMachineProcessingTests : IAsyncLifetime
 
     private long Push(object? value) => _store.Push(new OpcMessage("M1", "T", value, DateTime.UtcNow));
 
-    private async Task<OpcMachine> StartAsync(Func<OpcMessage, CancellationToken, Task> handler, TimeSpan? timeout = null)
+    private async Task<OpcMachine> StartAsync(Func<OpcMessage, CancellationToken, Task> handler, TimeSpan? timeout = null,
+        Func<int, TimeSpan>? retryDelay = null)
     {
         _machine = new OpcMachine("M1", _store)
         {
             OnMessage = handler,
             HandlerTimeout = timeout ?? TimeSpan.FromSeconds(5),
-            RetryDelay = _ => TimeSpan.FromMilliseconds(10),
+            RetryDelay = retryDelay ?? (_ => TimeSpan.FromMilliseconds(10)),
             ConnectRetryInterval = TimeSpan.FromHours(1),
         };
         await _machine.StartAsync(_ => throw new InvalidOperationException("kein OPC-Server in diesem Test"));
@@ -115,6 +116,72 @@ public sealed class OpcMachineProcessingTests : IAsyncLifetime
         await WaitUntilAsync(() => _store.Get(id)!.State == MessageState.Failed, "Failed durch Timeout");
 
         Assert.Equal("Timeout", _store.Get(id)!.Error);
+    }
+
+    [Fact]
+    public async Task Hanging_handler_is_timed_out_three_times_and_ends_in_failed_without_a_fourth_attempt()
+    {
+        var id = Push(1);
+        var calls = 0;
+        var retryDelays = new List<int>();
+
+        await StartAsync(
+            (_, _) => { Interlocked.Increment(ref calls); return Task.Delay(Timeout.Infinite); },
+            timeout: TimeSpan.FromMilliseconds(50),
+            retryDelay: failedAttempt => { lock (retryDelays) retryDelays.Add(failedAttempt); return TimeSpan.FromMilliseconds(1); });
+        await WaitUntilAsync(() => _store.Get(id)!.State == MessageState.Failed, "Failed durch dreifachen Timeout");
+
+        var stored = _store.Get(id)!;
+        Assert.Equal(3, Volatile.Read(ref calls));
+        Assert.Equal(3, stored.Attempts);
+        Assert.Equal("Timeout", stored.Error);
+        // Kein vierter Versuch: Nach dem dritten Fehlschlag wird kein weiterer Retry eingeplant (nur nach Versuch 1 und 2)
+        lock (retryDelays) Assert.Equal([1, 2], retryDelays);
+    }
+
+    [Fact]
+    public async Task Throwing_handler_is_tried_three_times_and_ends_in_failed_without_a_fourth_attempt()
+    {
+        var id = Push(1);
+        var calls = 0;
+        var retryDelays = new List<int>();
+
+        await StartAsync(
+            (_, _) => { Interlocked.Increment(ref calls); throw new InvalidOperationException("kaputt"); },
+            retryDelay: failedAttempt => { lock (retryDelays) retryDelays.Add(failedAttempt); return TimeSpan.FromMilliseconds(1); });
+        await WaitUntilAsync(() => _store.Get(id)!.State == MessageState.Failed, "Failed durch dreifache Exception");
+
+        var stored = _store.Get(id)!;
+        Assert.Equal(3, Volatile.Read(ref calls));
+        Assert.Equal(3, stored.Attempts);
+        Assert.Equal("kaputt", stored.Error);
+        lock (retryDelays) Assert.Equal([1, 2], retryDelays);
+    }
+
+    [Fact]
+    public async Task Requeued_failed_message_is_processed_again_after_wake()
+    {
+        var id = Push(1);
+        var calls = 0;
+        var fail = true;
+
+        await StartAsync((_, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Volatile.Read(ref fail) ? throw new InvalidOperationException("kaputt") : Task.CompletedTask;
+        });
+        await WaitUntilAsync(() => _store.Get(id)!.State == MessageState.Failed, "Failed");
+        Assert.Equal(3, Volatile.Read(ref calls));
+
+        Volatile.Write(ref fail, false);
+        Assert.Equal("M1", _store.Requeue(id));
+        _machine!.Wake();
+        await WaitUntilAsync(() => _store.Get(id)!.State == MessageState.Done, "erneute Verarbeitung nach Wake");
+
+        var stored = _store.Get(id)!;
+        Assert.Equal(4, Volatile.Read(ref calls));
+        Assert.Equal(1, stored.Attempts);
+        Assert.Null(stored.Error);
     }
 
     [Fact]
