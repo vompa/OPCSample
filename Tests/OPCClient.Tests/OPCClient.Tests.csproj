@@ -18,6 +18,7 @@
   <ItemGroup>
     <Using Include="Xunit" />
     <ProjectReference Include="..\..\Client\OPCClient\OPCClient.csproj" />
+    <ProjectReference Include="..\..\Server\OPCSimulator\OPCSimulator.csproj" />
   </ItemGroup>
 
 </Project>

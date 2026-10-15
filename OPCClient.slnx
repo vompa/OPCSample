@@ -1,5 +1,8 @@
 <Solution>
   <Folder Name="/Client/" />
+  <Folder Name="/Server/">
+    <Project Path="Server/OPCSimulator/OPCSimulator.csproj" />
+  </Folder>
   <Folder Name="/Tests/">
     <Project Path="Tests/OPCClient.Tests/OPCClient.Tests.csproj" />
   </Folder>
