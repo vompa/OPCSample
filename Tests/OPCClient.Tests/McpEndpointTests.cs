@@ -12,21 +12,9 @@ public sealed class McpEndpointTests(ApiFactory factory) : IClassFixture<ApiFact
 {
     private SqliteMessageStore Store => factory.Services.GetRequiredService<SqliteMessageStore>();
 
-    private async Task<McpClient> ConnectAsync(string key)
-    {
-        var transport = new HttpClientTransport(
-            new HttpClientTransportOptions
-            {
-                Endpoint = new Uri("http://localhost/mcp"),
-                AdditionalHeaders = new Dictionary<string, string> { ["X-Api-Key"] = key },
-            },
-            factory.CreateClient(),
-            ownsHttpClient: true);
-        return await McpClient.CreateAsync(transport);
-    }
+    private Task<McpClient> ConnectAsync(string key) => McpTestSupport.ConnectAsync(factory, key);
 
-    private static string TextOf(CallToolResult result) =>
-        string.Concat(result.Content.OfType<TextContentBlock>().Select(c => c.Text));
+    private static string TextOf(CallToolResult result) => McpTestSupport.TextOf(result);
 
     [Fact]
     public async Task Mcp_endpoint_requires_authentication()
@@ -42,19 +30,25 @@ public sealed class McpEndpointTests(ApiFactory factory) : IClassFixture<ApiFact
     }
 
     [Fact]
-    public async Task Agent_discovers_four_tools_and_none_writes_to_the_machine()
+    public async Task Agent_discovers_seven_tools_and_none_writes_to_the_machine()
     {
         await using var client = await ConnectAsync(ApiFactory.ReaderKey);
 
         var tools = await client.ListToolsAsync();
 
-        Assert.Equal(["get_latest_values", "list_machines", "query_messages", "retry_message"], tools.Select(t => t.Name).Order());
-        Assert.True(tools.Single(t => t.Name == "list_machines").ProtocolTool.Annotations?.ReadOnlyHint);
+        Assert.Equal(
+            ["get_active_alarms", "get_latest_values", "get_statistics", "list_machines", "query_alarms", "query_messages", "retry_message"],
+            tools.Select(t => t.Name).Order());
         Assert.False(tools.Single(t => t.Name == "retry_message").ProtocolTool.Annotations?.ReadOnlyHint);
+        foreach (var tool in tools.Where(t => t.Name != "retry_message"))
+        {
+            Assert.True(tool.ProtocolTool.Annotations?.ReadOnlyHint, tool.Name);
+            Assert.True(tool.ProtocolTool.Annotations?.IdempotentHint, tool.Name);
+        }
     }
 
     [Fact]
-    public async Task List_machines_reports_the_disconnected_press()
+    public async Task List_machines_reports_both_disconnected_machines()
     {
         await using var client = await ConnectAsync(ApiFactory.ReaderKey);
 
@@ -63,7 +57,8 @@ public sealed class McpEndpointTests(ApiFactory factory) : IClassFixture<ApiFact
         Assert.NotEqual(true, result.IsError);
         var text = TextOf(result);
         Assert.Contains("Presse-1", text, StringComparison.Ordinal);
-        Assert.Contains("\"connected\":false", text, StringComparison.Ordinal);
+        Assert.Contains("Drehbank-2", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"connected\":true", text, StringComparison.Ordinal);
     }
 
     [Fact]

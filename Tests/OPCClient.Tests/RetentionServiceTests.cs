@@ -28,9 +28,9 @@ public sealed class RetentionServiceTests : IDisposable
         store.Complete(oldDone);
         store.Complete(freshDone);
         store.Fail(oldFailed, attempts: 3, error: "x", maxAttempts: 3);
-        var service = new RetentionService(store, Options.Create(new RetentionOptions { DoneRetentionDays = 7 }));
+        var service = new RetentionService(store, new SqliteAlarmStore(_path), new SqliteAuditStore(_path), Options.Create(new RetentionOptions { DoneRetentionDays = 7 }));
 
-        var removed = service.RunOnce();
+        var removed = service.RunOnce().Messages;
 
         Assert.Equal(1, removed);
         Assert.Null(store.Get(oldDone));
@@ -45,9 +45,9 @@ public sealed class RetentionServiceTests : IDisposable
         var store = new SqliteMessageStore(_path);
         var id = store.Push(new OpcMessage("M1", "T", 1, DateTime.UtcNow));
         store.Complete(id);
-        var service = new RetentionService(store, Options.Create(new RetentionOptions { DoneRetentionDays = 0 }));
+        var service = new RetentionService(store, new SqliteAlarmStore(_path), new SqliteAuditStore(_path), Options.Create(new RetentionOptions { DoneRetentionDays = 0 }));
 
-        Assert.Equal(0, service.RunOnce());
+        Assert.Equal(0, service.RunOnce().Messages);
         Assert.NotNull(store.Get(id));
     }
 }

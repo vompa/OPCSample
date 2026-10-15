@@ -34,6 +34,23 @@ public static class OpcApi
                 s.Get(id) is { } m ? Results.Ok(m) : Results.NotFound())
            .WithTags("Nachrichten").WithSummary("Einzelne Nachricht");
 
+        api.MapGet("/alarms", ([AsParameters] AlarmFilter f, SqliteAlarmStore alarms) => alarms.Query(f))
+           .WithTags("Alarme")
+           .WithSummary("Alarme filtern (machine, name, from, to, activeOnly, limit, offset), neueste zuerst; from/to = Auslösezeitpunkt");
+
+        api.MapGet("/machines/{machine}/statistics", (string machine, string name, DateTime? from, DateTime? to,
+                int? bucketMinutes, SqliteStatisticsReader statistics) => Statistics(statistics, machine, name, from, to, bucketMinutes))
+           .WithTags("Maschinen")
+           .WithSummary("Statistik einer numerischen Variable über Wertänderungen (nicht zeitgewichtet); Standard: letzte Stunde, höchstens 31 Tage");
+
+        api.MapGet("/audit", ([AsParameters] AuditFilter f, SqliteAuditStore audit) =>
+                f.Outcome is not null && !AuditOutcomes.All.Contains(f.Outcome)
+                    ? Results.Problem($"Unbekanntes Ergebnis '{f.Outcome}'. Gültig: {string.Join(", ", AuditOutcomes.All)}.", statusCode: 400)
+                    : Results.Ok(audit.Query(f)))
+           .RequireAuthorization(Policies.Writer)
+           .WithTags("Audit")
+           .WithSummary("Audit-Log filtern (client, action, outcome, from, to, limit, offset), neueste zuerst (Rolle writer)");
+
         api.MapPost("/messages/{id:long}/retry", (long id, SqliteMessageStore s, MachineRegistry reg) =>
             {
                 var machine = s.Requeue(id);
@@ -42,6 +59,24 @@ public static class OpcApi
                 return Results.Accepted();
             })
            .RequireAuthorization(Policies.Writer)
+           .WithMetadata(new AuditedEndpoint("retry_message"))
            .WithTags("Nachrichten").WithSummary("Fehlgeschlagene Nachricht erneut einplanen (Rolle writer)");
+    }
+
+    private static IResult Statistics(SqliteStatisticsReader statistics, string machine, string name,
+        DateTime? from, DateTime? to, int? bucketMinutes)
+    {
+        try
+        {
+            return Results.Ok(statistics.Query(machine, name, from, to, bucketMinutes));
+        }
+        catch (InvalidQueryException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status400BadRequest);
+        }
+        catch (QueryTargetNotFoundException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
+        }
     }
 }

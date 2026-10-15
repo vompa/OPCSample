@@ -11,20 +11,39 @@ public sealed class RetentionOptions
     /// <summary>Erledigte Nachrichten, die älter sind, werden gelöscht. Fehlgeschlagene bleiben für das Retry erhalten.</summary>
     public int DoneRetentionDays { get; set; } = 7;
 
+    /// <summary>Beendete Alarme, die älter sind, werden gelöscht. Aktive Alarme bleiben immer erhalten.</summary>
+    public int AlarmRetentionDays { get; set; } = 30;
+
+    /// <summary>Audit-Einträge, die älter sind, werden gelöscht.</summary>
+    public int AuditRetentionDays { get; set; } = 90;
+
     public int IntervalMinutes { get; set; } = 60;
 }
 
-/// <summary>Räumt regelmäßig erledigte Nachrichten auf, damit die Datenbank nicht unbegrenzt wächst.</summary>
-public sealed class RetentionService(SqliteMessageStore store, IOptions<RetentionOptions> options) : BackgroundService
+/// <summary>Anzahl der entfernten Einträge je Tabelle.</summary>
+public record RetentionResult(int Messages, int Alarms, int AuditEntries);
+
+/// <summary>Räumt regelmäßig erledigte Nachrichten, beendete Alarme und alte Audit-Einträge auf, damit die Datenbank nicht unbegrenzt wächst.</summary>
+public sealed class RetentionService(
+    SqliteMessageStore messages, SqliteAlarmStore alarms, SqliteAuditStore audit, IOptions<RetentionOptions> options)
+    : BackgroundService
 {
-    public int RunOnce()
+    public RetentionResult RunOnce()
     {
-        var days = Math.Max(options.Value.DoneRetentionDays, 1);
-        var removed = store.Purge(TimeSpan.FromDays(days));
-        if (removed > 0)
-            Log.Information("Aufräumen: {Removed} erledigte Nachrichten älter als {Days} Tage entfernt", removed, days);
-        return removed;
+        var o = options.Value;
+        var result = new RetentionResult(
+            messages.Purge(Days(o.DoneRetentionDays)),
+            alarms.PurgeCleared(Days(o.AlarmRetentionDays)),
+            audit.Purge(Days(o.AuditRetentionDays)));
+
+        if (result != new RetentionResult(0, 0, 0))
+            Log.Information("Aufräumen: {Messages} erledigte Nachrichten, {Alarms} beendete Alarme, {Audit} Audit-Einträge entfernt",
+                result.Messages, result.Alarms, result.AuditEntries);
+        return result;
     }
+
+    /// <summary>Mindestens ein Tag, damit eine falsche Konfiguration (0, negativ) nicht alles löscht.</summary>
+    private static TimeSpan Days(int days) => TimeSpan.FromDays(Math.Max(days, 1));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

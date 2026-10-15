@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using OPCClient.Opc;
@@ -11,15 +10,12 @@ public record StoredMessage(long Id, OpcMessage Message, int Attempts);
 public sealed class SqliteMessageStore
 {
     private const string Cols = "id, machine, name, value_json, ts, state, attempts, error";
-    private readonly string _cs;
+    private readonly SqliteDatabase _db;
 
     public SqliteMessageStore(string path)
     {
-        _cs = new SqliteConnectionStringBuilder { DataSource = path, Pooling = true }.ToString();
-
-        using var c = Open();
-        Exec(c, "PRAGMA journal_mode=WAL;");
-        Exec(c, """
+        _db = new SqliteDatabase(path);
+        _db.EnsureSchema("""
             CREATE TABLE IF NOT EXISTS messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 machine    TEXT NOT NULL,
@@ -32,10 +28,12 @@ public sealed class SqliteMessageStore
                 error      TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_pending ON messages(machine, state, id);
+            CREATE INDEX IF NOT EXISTS ix_series ON messages(machine, name, ts);
             """);
 
         // Nach Absturz: "in Arbeit" wieder auf "offen" setzen
-        Exec(c, "UPDATE messages SET state = 0 WHERE state = 1;");
+        using var c = _db.Open();
+        SqliteDatabase.Exec(c, "UPDATE messages SET state = 0 WHERE state = 1;");
     }
 
     /// <summary>
@@ -53,26 +51,11 @@ public sealed class SqliteMessageStore
     internal static Type? ResolveValueType(string? name) =>
         name is not null && AllowedValueTypes.TryGetValue(name, out var type) ? type : null;
 
-    private SqliteConnection Open()
-    {
-        var c = new SqliteConnection(_cs);
-        c.Open();
-        Exec(c, "PRAGMA busy_timeout=5000;");
-        return c;
-    }
-
-    private static void Exec(SqliteConnection c, string sql)
-    {
-        using var cmd = c.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
-    }
-
     // ---------- Schreiben / Verarbeiten ----------
 
     public long Push(OpcMessage m)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             INSERT INTO messages (machine, name, value_json, value_type, ts)
@@ -82,14 +65,14 @@ public sealed class SqliteMessageStore
         cmd.Parameters.AddWithValue("$n", m.Name);
         cmd.Parameters.AddWithValue("$v", m.Value is null ? DBNull.Value : JsonSerializer.Serialize(m.Value));
         cmd.Parameters.AddWithValue("$t", m.Value?.GetType().FullName ?? (object)DBNull.Value);
-        cmd.Parameters.AddWithValue("$ts", m.Timestamp.ToUniversalTime().ToString("o"));
+        cmd.Parameters.AddWithValue("$ts", SqliteDatabase.FormatTimestamp(m.Timestamp));
         return (long)cmd.ExecuteScalar()!;
     }
 
     /// <summary>Atomar: neueste offene Nachricht holen und auf "in Arbeit" setzen (LIFO).</summary>
     public StoredMessage? TryPop(string machine)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             UPDATE messages SET state = 1, attempts = attempts + 1
@@ -111,7 +94,7 @@ public sealed class SqliteMessageStore
         }
 
         var msg = new OpcMessage(r.GetString(1), r.GetString(2), value,
-            DateTime.Parse(r.GetString(5), null, DateTimeStyles.RoundtripKind), r.GetInt64(0));
+            SqliteDatabase.ParseTimestamp(r.GetString(5)), r.GetInt64(0));
         return new StoredMessage(r.GetInt64(0), msg, r.GetInt32(6));
     }
 
@@ -120,7 +103,7 @@ public sealed class SqliteMessageStore
     /// <summary>Gibt eine in Arbeit befindliche Nachricht zurück (z. B. beim Shutdown), ohne den Versuch zu zählen.</summary>
     public void Release(long id)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "UPDATE messages SET state = 0, attempts = MAX(attempts - 1, 0) WHERE id = $id AND state = 1";
         cmd.Parameters.AddWithValue("$id", id);
@@ -133,7 +116,7 @@ public sealed class SqliteMessageStore
 
     private void Update(long id, MessageState state, string? error)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "UPDATE messages SET state = $s, error = $e WHERE id = $id";
         cmd.Parameters.AddWithValue("$s", (int)state);
@@ -144,7 +127,7 @@ public sealed class SqliteMessageStore
 
     public int PendingCount(string machine)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM messages WHERE machine = $m AND state = 0";
         cmd.Parameters.AddWithValue("$m", machine);
@@ -154,10 +137,10 @@ public sealed class SqliteMessageStore
     /// <summary>Erledigte Einträge aufräumen.</summary>
     public int Purge(TimeSpan olderThan)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "DELETE FROM messages WHERE state = 2 AND ts < $limit";
-        cmd.Parameters.AddWithValue("$limit", DateTime.UtcNow.Subtract(olderThan).ToString("o"));
+        cmd.Parameters.AddWithValue("$limit", SqliteDatabase.FormatTimestamp(DateTime.UtcNow.Subtract(olderThan)));
         return cmd.ExecuteNonQuery();
     }
 
@@ -166,7 +149,7 @@ public sealed class SqliteMessageStore
     private static MessageDto Map(SqliteDataReader r) => new(
         r.GetInt64(0), r.GetString(1), r.GetString(2),
         r.IsDBNull(3) ? null : JsonSerializer.Deserialize<JsonElement>(r.GetString(3)),
-        DateTime.Parse(r.GetString(4), null, DateTimeStyles.RoundtripKind),
+        SqliteDatabase.ParseTimestamp(r.GetString(4)),
         (MessageState)r.GetInt32(5), r.GetInt32(6), r.IsDBNull(7) ? null : r.GetString(7));
 
     public PagedResult<MessageDto> Query(MessageFilter f)
@@ -179,11 +162,11 @@ public sealed class SqliteMessageStore
         if (f.Machine is not null) { where.Add("machine = $machine"); ps.Add(("$machine", f.Machine)); }
         if (f.Name is not null)    { where.Add("name = $name");       ps.Add(("$name", f.Name)); }
         if (f.State is not null)   { where.Add("state = $state");     ps.Add(("$state", (int)f.State)); }
-        if (f.From is not null)    { where.Add("ts >= $from");        ps.Add(("$from", f.From.Value.ToUniversalTime().ToString("o"))); }
-        if (f.To is not null)      { where.Add("ts <= $to");          ps.Add(("$to", f.To.Value.ToUniversalTime().ToString("o"))); }
-        var w = where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "";
+        if (f.From is not null)    { where.Add("ts >= $from");        ps.Add(("$from", SqliteDatabase.FormatTimestamp(f.From.Value))); }
+        if (f.To is not null)      { where.Add("ts <= $to");          ps.Add(("$to", SqliteDatabase.FormatTimestamp(f.To.Value))); }
+        var w = SqliteDatabase.BuildWhere(where);
 
-        using var c = Open();
+        using var c = _db.Open();
 
         using var cnt = c.CreateCommand();
         cnt.CommandText = $"SELECT COUNT(*) FROM messages {w}";
@@ -204,7 +187,7 @@ public sealed class SqliteMessageStore
 
     public MessageDto? Get(long id)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = $"SELECT {Cols} FROM messages WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", id);
@@ -215,7 +198,7 @@ public sealed class SqliteMessageStore
     /// <summary>Aktuellster Wert je Variable einer Maschine.</summary>
     public List<MessageDto> Latest(string machine)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = $"""
             SELECT {Cols} FROM messages
@@ -232,7 +215,7 @@ public sealed class SqliteMessageStore
     /// <summary>Alle Maschinen, zu denen Nachrichten gespeichert sind (auch wenn sie nicht mehr konfiguriert sind).</summary>
     public List<string> MachineNames()
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "SELECT DISTINCT machine FROM messages ORDER BY machine";
         var names = new List<string>();
@@ -244,7 +227,7 @@ public sealed class SqliteMessageStore
     public Dictionary<string, int> Stats(string machine)
     {
         var res = Enum.GetNames<MessageState>().ToDictionary(n => n, _ => 0);
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "SELECT state, COUNT(*) FROM messages WHERE machine = $m GROUP BY state";
         cmd.Parameters.AddWithValue("$m", machine);
@@ -256,7 +239,7 @@ public sealed class SqliteMessageStore
     /// <summary>Fehlgeschlagene Nachricht wieder auf "offen"; liefert den Maschinennamen.</summary>
     public string? Requeue(long id)
     {
-        using var c = Open();
+        using var c = _db.Open();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             UPDATE messages SET state = 0, attempts = 0, error = NULL

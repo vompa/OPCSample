@@ -3,6 +3,7 @@ using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.OpenApi;
+using OPCClient.Mcp;
 using OPCClient.Security;
 using OPCClient.Api;
 using OPCClient.Opc;
@@ -32,7 +33,13 @@ try
     builder.Host.UseSerilog();
     builder.WebHost.UseUrls(builder.Configuration["Urls"] ?? "http://localhost:5080");
 
-    builder.Services.AddSingleton(new SqliteMessageStore(builder.Configuration["Database:Path"] ?? "opc.db"));
+    var databasePath = builder.Configuration["Database:Path"] ?? "opc.db";
+    builder.Services.AddSingleton(new SqliteMessageStore(databasePath));
+    builder.Services.AddSingleton(new SqliteAlarmStore(databasePath));
+    builder.Services.AddSingleton(new SqliteAuditStore(databasePath));
+    builder.Services.AddSingleton(new SqliteStatisticsReader(databasePath));
+    builder.Services.AddSingleton<AlarmMonitor>();
+    builder.Services.AddSingleton<AuditLog>();
     builder.Services.AddSingleton<MachineRegistry>();
     builder.Services.AddHostedService<OpcHostedService>();
 
@@ -51,9 +58,10 @@ try
     builder.Services.AddHttpContextAccessor();
     builder.Services.AddMcpServer()
         .WithHttpTransport(options => options.Stateless = true)
-        .WithTools<OPCClient.Mcp.OpcTools>();
+        .WithTools<OPCClient.Mcp.OpcTools>()
+        .WithRequestFilters(filters => filters.AddCallToolFilter(McpAuditFilter.Create));
 
-    // --- Aufräumen erledigter Nachrichten ---
+    // --- Aufräumen erledigter Nachrichten, beendeter Alarme und alter Audit-Einträge ---
     builder.Services.AddOptions<RetentionOptions>().Bind(builder.Configuration.GetSection(RetentionOptions.SectionName));
     builder.Services.AddHostedService<RetentionService>();
 
@@ -74,14 +82,16 @@ try
         .AddPolicy(Policies.Writer, p => p.RequireRole(Roles.Writer));
 
     // --- Rate Limiting pro Client (bzw. pro IP, solange niemand angemeldet ist; bremst Key-Raten) ---
+    // Global für alle Anfragen, strenger für /mcp (Policy "mcp"): ein Agent soll das System nicht fluten.
     var requestsPerMinute = builder.Configuration.GetValue("RateLimit:RequestsPerMinute", 120);
+    var mcpRequestsPerMinute = builder.Configuration.GetValue("RateLimit:McpRequestsPerMinute", 30);
     builder.Services.AddRateLimiter(limiter =>
     {
         limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
         limiter.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-            RateLimitPartition.GetFixedWindowLimiter(
-                context.User.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
-                _ => new FixedWindowRateLimiterOptions { PermitLimit = requestsPerMinute, Window = TimeSpan.FromMinutes(1) }));
+            PerClientPerMinute(context, requestsPerMinute));
+        limiter.AddPolicy(RateLimitPolicies.Mcp, context => PerClientPerMinute(context, mcpRequestsPerMinute));
+        limiter.OnRejected = RateLimitRejection.WriteAsync;
     });
 
     // Enums als Text (Pending/Done/...) statt Zahl
@@ -116,9 +126,10 @@ try
 
     app.UseAuthentication();
     app.UseRateLimiter();   // nach Authentication (kennt den Client), vor Authorization (bremst auch fehlgeschlagene Versuche)
+    app.UseMiddleware<RestAuditMiddleware>();   // vor Authorization, damit auch abgewiesene (403) Schreibversuche im Audit landen
     app.UseAuthorization();
     app.MapOpcApi();
-    app.MapMcp("/mcp");
+    app.MapMcp("/mcp").RequireRateLimiting(RateLimitPolicies.Mcp);
     app.Run();
 }
 catch (Exception ex)
@@ -129,5 +140,10 @@ finally
 {
     await Log.CloseAndFlushAsync();
 }
+
+static RateLimitPartition<string> PerClientPerMinute(HttpContext context, int permitLimit) =>
+    RateLimitPartition.GetFixedWindowLimiter(
+        context.User.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = Math.Max(permitLimit, 1), Window = TimeSpan.FromMinutes(1) });
 
 public partial class Program;

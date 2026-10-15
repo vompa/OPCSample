@@ -7,6 +7,9 @@ public class NodeConfig
 {
     public string Name { get; set; } = "";
     public string NodeId { get; set; } = "";
+
+    /// <summary>Optionale Grenzwerte; bei Überschreitung entsteht ein Alarm.</summary>
+    public LimitsConfig? Limits { get; set; }
 }
 
 public class MachineConfig
@@ -21,11 +24,13 @@ public class MachineConfig
 
 /// <summary>Startet beim Hochfahren des Webservers alle konfigurierten Maschinen.</summary>
 public sealed class OpcHostedService(
-    MachineRegistry registry, SqliteMessageStore store, IMessageHandler handler, IConfiguration config) : IHostedService
+    MachineRegistry registry, SqliteMessageStore store, IMessageHandler handler, IConfiguration config,
+    AlarmMonitor alarms) : IHostedService
 {
     public async Task StartAsync(CancellationToken ct)
     {
         var machines = config.GetSection("Opc:Machines").Get<List<MachineConfig>>() ?? new();
+        ValidateLimits(machines);
         var timeout = TimeSpan.FromSeconds(config.GetValue("Opc:HandlerTimeoutSeconds", 5));
         var autoAcceptCertificates = config.GetValue("Opc:AutoAcceptUntrustedCertificates", false);
 
@@ -37,8 +42,10 @@ public sealed class OpcHostedService(
                 var machine = new OpcMachine(mc.Name, store)
                 {
                     HandlerTimeout = timeout,
-                    OnMessage = handler.HandleAsync
+                    OnMessage = handler.HandleAsync,
+                    Alarms = alarms
                 };
+                RegisterLimits(mc);
                 await machine.StartAsync(
                     token => OpcSessionFactory.CreateAsync(
                         mc.Endpoint, $"OPCClient-{mc.Name}", token, mc.UseSecurity, autoAcceptCertificates),
@@ -50,6 +57,22 @@ public sealed class OpcHostedService(
                 Log.ForContext("Machine", mc.Name).Error(ex, "Start fehlgeschlagen ({Endpoint})", mc.Endpoint);
             }
         }
+    }
+
+    /// <summary>Ungültige Grenzwerte sind ein Konfigurationsfehler: der Dienst startet dann nicht.</summary>
+    private static void ValidateLimits(IEnumerable<MachineConfig> machines)
+    {
+        foreach (var machine in machines)
+            foreach (var node in machine.Nodes)
+                if (node.Limits?.Validate() is { } error)
+                    throw new InvalidOperationException(
+                        $"Ungültige Grenzwerte für {machine.Name}.{node.Name} (Opc:Machines): {error}");
+    }
+
+    private void RegisterLimits(MachineConfig machine)
+    {
+        foreach (var node in machine.Nodes.Where(n => n.Limits is not null))
+            alarms.Register(machine.Name, node.Name, node.Limits!);
     }
 
     public async Task StopAsync(CancellationToken ct)

@@ -1,6 +1,6 @@
 # OPCClient
 
-ASP.NET-Core-Dienst (.NET 8), der Werte von OPC-UA-Servern (Maschinen) abonniert, sie in einer lokalen SQLite-Datenbank zwischenspeichert und nacheinander an einen Handler übergibt. Über eine kleine REST-API (mit Swagger) lassen sich Maschinen, Nachrichten und Fehlschläge einsehen.
+ASP.NET-Core-Dienst (.NET 10), der Werte von OPC-UA-Servern (Maschinen) abonniert, sie in einer lokalen SQLite-Datenbank zwischenspeichert und nacheinander an einen Handler übergibt. Über eine kleine REST-API (mit Swagger) lassen sich Maschinen, Nachrichten und Fehlschläge einsehen.
 
 ## Funktionsweise
 
@@ -13,7 +13,10 @@ OPC-UA-Server ──Subscription──▶ Rx-Stream ──DistinctUntilChanged�
 - **Persistent**: Jede Änderung landet zuerst in SQLite. Offene Nachrichten überleben einen Neustart.
 - **LIFO**: Der Worker verarbeitet die *neueste* Nachricht zuerst.
 - **Retry mit Backoff**: Schlägt der Handler fehl oder überschreitet er das Timeout, wird die Nachricht bis zu 3-mal versucht (Wartezeit wächst exponentiell, mit Jitter), danach gilt sie als `Failed`. Während der Wartezeit werden andere Nachrichten weiter verarbeitet.
-- **Aufräumen**: Erledigte Nachrichten werden nach 7 Tagen gelöscht (`Retention`), `Failed` bleiben bis zum Retry.
+- **Aufräumen**: Erledigte Nachrichten werden nach 7 Tagen gelöscht (`Retention`), `Failed` bleiben bis zum Retry. Beendete Alarme (30 Tage) und Audit-Einträge (90 Tage) werden vom selben Dienst aufgeräumt.
+- **Alarme**: Für numerische Variablen lassen sich Grenzwerte konfigurieren (siehe [Alarme](#alarme-grenzwerte)).
+- **Statistik**: Min, Max, Mittelwert und Zeitreihen über gespeicherte Werte (siehe [Statistik](#statistik)).
+- **Audit**: Jeder MCP-Tool-Aufruf und jeder schreibende REST-Aufruf wird persistent protokolliert (siehe [Audit-Log](#audit-log)).
 - **OPC-Server optional**: Der Dienst startet auch ohne erreichbaren Server. Die Verbindung wird im Hintergrund alle 10 Sekunden neu versucht. Bis dahin laufen Worker, API und das Abarbeiten offener Nachrichten aus der DB normal weiter. Ein Verbindungsabbruch im laufenden Betrieb wird automatisch wiederhergestellt.
 
 ### Nachrichtenstatus
@@ -29,7 +32,7 @@ Nachrichten im Status `Processing` werden beim Start wieder auf `Pending` gesetz
 
 ## Voraussetzungen
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - Optional: ein OPC-UA-Server (Standard: `opc.tcp://localhost:4840`)
 
 ## Starten
@@ -68,8 +71,10 @@ Alles steht in `appsettings.json`:
         "Name": "Presse-1",
         "Endpoint": "opc.tcp://localhost:4840",
         "Nodes": [
-          { "Name": "Temperatur", "NodeId": "ns=2;s=Temperatur" },
-          { "Name": "Status", "NodeId": "ns=2;s=Status" }
+          { "Name": "Temperatur", "NodeId": "ns=2;s=Presse-1.Temperatur", "Limits": { "Low": 10, "High": 80 } },
+          { "Name": "Drehzahl", "NodeId": "ns=2;s=Presse-1.Drehzahl", "Limits": { "High": 1600 } },
+          { "Name": "Status", "NodeId": "ns=2;s=Presse-1.Status" },
+          { "Name": "Stueckzahl", "NodeId": "ns=2;s=Presse-1.Stueckzahl" }
         ]
       }
     ]
@@ -86,14 +91,18 @@ Alles steht in `appsettings.json`:
 | `Opc:Sink:WebhookUrl`      | Ziel des Webhooks, nur HTTPS (HTTP nur für localhost)          |
 | `Opc:AutoAcceptUntrustedCertificates` | Unbekannte Serverzertifikate akzeptieren (Standard `false`) |
 | `Retention:DoneRetentionDays` | Erledigte Nachrichten älter als N Tage löschen (Standard 7)  |
+| `Retention:AlarmRetentionDays` | Beendete Alarme älter als N Tage löschen (Standard 30); aktive bleiben |
+| `Retention:AuditRetentionDays` | Audit-Einträge älter als N Tage löschen (Standard 90)        |
 | `Retention:IntervalMinutes`   | Prüfintervall des Aufräumens (Standard 60)                   |
 | `Authentication:ApiKeys[]`  | `Name`, `KeySha256`, `Role` (`reader`/`writer`)                |
-| `RateLimit:RequestsPerMinute` | Anfragen pro Minute und Client (Standard 120)                |
+| `RateLimit:RequestsPerMinute` | Anfragen pro Minute und Client für alle Endpunkte (Standard 120) |
+| `RateLimit:McpRequestsPerMinute` | Strengere Grenze nur für `/mcp`, pro Client (Standard 30)   |
 | `Machines[].UseSecurity`   | OPC-Endpoint mit Signierung und Verschlüsselung (Standard `false`) |
 | `Opc:Machines[]`           | Liste der Maschinen (beliebig viele, auch leer)                |
 | `Machines[].Name`          | Eindeutiger Name, wird in API, DB und Logs verwendet           |
 | `Machines[].Endpoint`      | OPC-UA-Endpoint-URL                                            |
 | `Machines[].Nodes[]`       | Zu überwachende Variablen (`Name` + `NodeId`)                  |
+| `Nodes[].Limits:Low` / `High` | Optionale Grenzwerte für Alarme (numerisch, `Low` < `High`); ungültig = Dienst startet nicht |
 
 Einstellungen lassen sich auch per Umgebungsvariable überschreiben, z. B. `Opc__HandlerTimeoutSeconds=10`.
 
@@ -109,16 +118,78 @@ Basis: `/api`
 | GET     | `/messages`                       | Nachrichten filtern, neueste zuerst                                          |
 | GET     | `/messages/{id}`                  | Einzelne Nachricht                                                           |
 | POST    | `/messages/{id}/retry`            | Fehlgeschlagene Nachricht erneut einplanen (Rolle `writer`)                  |
+| GET     | `/alarms`                         | Alarme filtern, neueste zuerst                                               |
+| GET     | `/machines/{machine}/statistics`  | Statistik einer numerischen Variable (Parameter `name` ist Pflicht)          |
+| GET     | `/audit`                          | Audit-Log filtern, neueste zuerst (nur Rolle `writer`)                       |
 
 Filter für `/messages` (Query-Parameter): `machine`, `name`, `state`, `from`, `to`, `limit` (Standard 100), `offset`.
+
+Filter für `/alarms`: `machine`, `name`, `from`, `to` (jeweils bezogen auf den Auslösezeitpunkt), `activeOnly` (`true` = nur aktive), `limit` (Standard 100, höchstens 500), `offset`.
+
+Parameter für `/machines/{machine}/statistics`: `name` (Pflicht), `from`, `to` (Standard: letzte Stunde, höchstens 31 Tage), `bucketMinutes` (1 bis 1440, optional). Fehler: `400` (Zeitraum zu groß, mehr als 200 Buckets, Variable nicht numerisch) und `404` (Maschine oder Variable ohne gespeicherte Werte).
+
+Filter für `/audit`: `client`, `action`, `outcome` (`ok`, `denied`, `error`), `from`, `to`, `limit` (Standard 100, höchstens 500), `offset`.
 
 Beispiele:
 
 ```bash
 curl -H "X-Api-Key: dev-reader-key" http://localhost:5080/api/machines
+curl -H "X-Api-Key: dev-reader-key" "http://localhost:5080/api/alarms?activeOnly=true"
+curl -H "X-Api-Key: dev-reader-key" "http://localhost:5080/api/machines/Presse-1/statistics?name=Temperatur&bucketMinutes=10"
+curl -H "X-Api-Key: dev-writer-key" "http://localhost:5080/api/audit?outcome=denied"
 curl -H "X-Api-Key: dev-reader-key" "http://localhost:5080/api/messages?machine=Presse-1&state=Failed&limit=20"
 curl -X POST -H "X-Api-Key: dev-writer-key" http://localhost:5080/api/messages/42/retry
 ```
+
+## Alarme (Grenzwerte)
+
+Jede numerische Variable kann unter `Nodes[].Limits` eine untere (`Low`) und/oder obere (`High`) Grenze bekommen. Geprüft wird jede neu gespeicherte Wertänderung, direkt nach dem Persistieren:
+
+- Wert > `High` löst einen Alarm `High` aus, Wert < `Low` einen Alarm `Low` (gespeichert werden Zeitpunkt, Wert und verletzte Grenze). Ein Wert genau auf der Grenze gilt als im Bereich.
+- Kehrt der Wert in den Bereich zurück, wird der Alarm beendet (`clearedAt`, `clearedValue`).
+- Pro Maschine, Variable und Art gibt es höchstens **einen aktiven Alarm**; das erzwingt die Datenbank (Teil-Index), nicht nur der Code.
+- Nicht numerische Werte (Text, Bool, Arrays) werden ignoriert.
+- Der Zustand liegt nur in der Datenbank: Nach einem Neustart bleiben aktive Alarme aktiv, es entstehen keine Duplikate.
+- Ungültige Grenzen (`Low` >= `High`, keine endliche Zahl) lehnt der Dienst beim Start mit einer Meldung ab, die Maschine und Variable nennt.
+
+Die Prüfung steckt in `Opc/AlarmMonitor.cs` und kennt keinen OPC-Server; Alarme sind über `GET /api/alarms` und die MCP-Tools `get_active_alarms` und `query_alarms` abrufbar. Beendete Alarme räumt der `RetentionService` nach `Retention:AlarmRetentionDays` Tagen auf.
+
+Tabelle `alarms` (in derselben Datenbank):
+
+| Spalte          | Bedeutung                                         |
+|-----------------|---------------------------------------------------|
+| `id`            | Primärschlüssel                                   |
+| `machine`, `name` | Maschine und Variable                           |
+| `kind`          | `High` oder `Low`                                 |
+| `limit_value`   | Verletzte Grenze                                  |
+| `value`         | Auslösender Wert                                  |
+| `raised_at`     | Zeitpunkt des auslösenden Werts (UTC, ISO 8601)   |
+| `cleared_at`    | Zeitpunkt der Rückkehr in den Bereich; `NULL` = aktiv |
+| `cleared_value` | Wert, der den Alarm beendet hat                   |
+
+## Statistik
+
+`GET /api/machines/{machine}/statistics` und das MCP-Tool `get_statistics` liefern für eine **numerische** Variable im Zeitraum `from` bis `to` (Standard: letzte Stunde, höchstens 31 Tage) `count`, `min`, `max`, `avg` sowie den ersten und letzten Wert mit Zeitpunkt. Mit `bucketMinutes` (1 bis 1440) kommt eine Zeitreihe mit `count`, `min`, `max` und `avg` je Zeitabschnitt dazu, höchstens 200 Abschnitte (sonst Fehler mit Hinweis); Abschnitte ohne Werte fehlen. Die Berechnung läuft in SQLite, nur für numerische Typen.
+
+**Wichtig:** Gespeichert werden nur *Wertänderungen* (`DistinctUntilChanged`). Die Statistik ist daher eine Statistik über Änderungen und **nicht zeitgewichtet**: Ein Wert, der stundenlang konstant war, zählt nur einmal. Der Mittelwert ist kein Zeitmittel. Das steht auch im Feld `note` jeder Antwort und in der Tool-Beschreibung.
+
+## Audit-Log
+
+Jeder MCP-Tool-Aufruf (auch Fehlschläge und abgewiesene Schreibversuche) und jeder schreibende REST-Aufruf (`POST /api/messages/{id}/retry`, auch bei `403`) erzeugt genau einen Eintrag in der Tabelle `audit` und eine Logzeile. Für MCP sorgt ein `CallToolFilter` (`Mcp/McpAuditFilter.cs`) dafür, für REST eine Middleware vor der Autorisierung (`Security/RestAuditMiddleware.cs`). Der Filter prüft außerdem die Rolle: Ein Tool, das nicht als `ReadOnly` markiert ist, braucht `writer`.
+
+| Spalte      | Bedeutung                                                    |
+|-------------|--------------------------------------------------------------|
+| `id`        | Primärschlüssel                                              |
+| `ts`        | Zeitpunkt (UTC, ISO 8601)                                    |
+| `client`    | Name des API-Keys                                            |
+| `role`      | `reader` oder `writer`                                       |
+| `channel`   | `mcp` oder `rest`                                            |
+| `action`    | Tool bzw. Aktion, z. B. `get_statistics`, `retry_message`    |
+| `arguments` | Argumente, auf 300 Zeichen gekürzt                           |
+| `outcome`   | `ok`, `denied` oder `error`                                  |
+| `error`     | Kurze Fehlermeldung (gekürzt), sonst leer                    |
+
+Abfrage: `GET /api/audit` (nur Rolle `writer`, neueste zuerst). Es gibt bewusst kein MCP-Tool dafür. Nicht protokolliert werden lesende REST-Aufrufe, Anfragen ohne gültigen Key (`401`, der Key-Handler loggt sie als Warnung) und vom Rate Limit abgewiesene Anfragen (sie landen als Warnung im Log, da das Limit vor dem Tool greift). Schlägt das Schreiben eines Eintrags fehl, läuft die Anfrage weiter und der Fehler wird geloggt. Aufräumen nach `Retention:AuditRetentionDays` Tagen.
 
 ## Eigene Verarbeitung einbauen
 
@@ -146,18 +217,24 @@ OPCClient/
 │   ├── OpcHostedService.cs    Startet alle Maschinen
 │   ├── OpcMachine.cs          Session, Subscription, Rx-Stream, Worker, Reconnect
 │   ├── OpcSessionFactory.cs   Aufbau der OPC-UA-Session (Sicherheit, Zertifikate)
+│   ├── AlarmMonitor.cs        Grenzwertprüfung, Alarme auslösen und beenden
 │   ├── MachineRegistry.cs     Verzeichnis der laufenden Maschinen
 │   ├── MessageHandlers.cs     IMessageHandler: Log und Webhook
 │   ├── MessageValueComparer.cs  Vergleich für DistinctUntilChanged (auch Arrays)
 │   ├── RetryBackoff.cs        Wartezeiten zwischen Versuchen
 │   └── OpcMessage.cs          Nachrichtenmodell
 ├── Storage/
+│   ├── SqliteDatabase.cs      Gemeinsamer Zugang zur SQLite-Datei
 │   ├── SqliteMessageStore.cs  Persistenter Stack in SQLite
-│   ├── RetentionService.cs    Löscht erledigte Nachrichten nach Frist
+│   ├── SqliteAlarmStore.cs    Alarme (Tabelle alarms)
+│   ├── SqliteAuditStore.cs    Audit-Log (Tabelle audit)
+│   ├── SqliteStatisticsReader.cs  Statistik per SQL über die Nachrichten
+│   ├── RetentionService.cs    Räumt Nachrichten, Alarme und Audit nach Frist auf
 │   └── Models.cs              DTOs, Filter, Status
-├── Security/                  API-Key-Handler, Rollen, Hashing
+├── Security/                  API-Key-Handler, Rollen, Hashing, Audit, Rate-Limit-Antwort
 └── Mcp/
-    └── OpcTools.cs            MCP-Tools für KI-Agenten
+    ├── OpcTools.cs            MCP-Tools für KI-Agenten
+    └── McpAuditFilter.cs      Audit und Rollenprüfung für jeden Tool-Aufruf
 ```
 
 ## Laufzeitdateien
@@ -175,7 +252,8 @@ Werden beim Start im Arbeitsverzeichnis angelegt:
 - Jeder Endpunkt außer `/api/health` verlangt einen **API-Key** (`X-Api-Key: <key>` oder `Authorization: Bearer <key>`). Das gilt für die REST-API und für `/mcp`.
 - Zwei Rollen: `reader` (lesen) und `writer` (zusätzlich `POST /api/messages/{id}/retry` bzw. das MCP-Tool `retry_message`).
 - Konfiguriert wird nur der **SHA-256-Hash** eines Keys, nie der Klartext. Ohne gültig konfigurierten Key startet der Dienst nicht.
-- Pro Client (bzw. pro IP bei fehlgeschlagener Anmeldung) gilt ein Rate Limit (`RateLimit:RequestsPerMinute`, Standard 120).
+- Pro Client (bzw. pro IP bei fehlgeschlagener Anmeldung) gilt ein Rate Limit (`RateLimit:RequestsPerMinute`, Standard 120). Für `/mcp` gilt zusätzlich eine strengere Grenze (`RateLimit:McpRequestsPerMinute`, Standard 30, pro Client). Bei Überschreitung antwortet der Dienst mit `429`, einem `Retry-After`-Header (Sekunden) und einem erklärenden Text; die Ablehnung steht als Warnung im Log. Ein MCP-Aufruf besteht aus mehreren HTTP-Anfragen (Initialisierung, Tool-Aufruf), die alle zählen.
+- Jeder MCP-Tool-Aufruf und jeder schreibende REST-Aufruf steht im [Audit-Log](#audit-log).
 - Swagger ist nur im Development-Profil aktiv.
 
 Eigenen Key erzeugen und eintragen:
@@ -200,6 +278,18 @@ Der Dienst bindet standardmäßig nur an `localhost` und spricht HTTP. Wird er v
 ### MCP und KI-Agenten
 
 - `/mcp` bietet nur lesende Tools und `retry_message`. Es gibt **kein** Tool, das Werte auf der Maschine schreibt.
+
+| Tool                | Zweck                                                                                       |
+|---------------------|---------------------------------------------------------------------------------------------|
+| `list_machines`     | Maschinen mit Verbindungsstatus und Nachrichtenzahlen (erster Schritt)                      |
+| `get_latest_values` | Aktuellster Wert je Variable einer Maschine                                                 |
+| `query_messages`    | Gespeicherte Wertänderungen filtern (seitenweise, höchstens 100 pro Seite)                  |
+| `get_active_alarms` | Aktive Alarme, optional einer Maschine                                                      |
+| `query_alarms`      | Alarme filtern (Maschine, Variable, Zeitraum, nur aktive), seitenweise, höchstens 100       |
+| `get_statistics`    | Min, Max, Mittel, erster/letzter Wert, optional Zeitreihe (nicht zeitgewichtet, siehe oben) |
+| `retry_message`     | Fehlgeschlagene Nachricht erneut einplanen (nur Rolle `writer`)                             |
+
+  Alle Tools außer `retry_message` sind als nur lesend und idempotent markiert. Fehlermeldungen sind für das Modell formuliert (z. B. unbekannte Maschine, nicht numerische Variable, Zeitraum zu groß) und nennen den nächsten sinnvollen Schritt.
 - Werte und Variablennamen kommen von der Maschine und sind aus Sicht des Agenten nicht vertrauenswürdiger Text (Prompt Injection ist über Textvariablen denkbar). Agenten sollten Werte als Daten behandeln, nicht als Anweisungen.
 
 ## Troubleshooting
@@ -209,6 +299,8 @@ Der Dienst bindet standardmäßig nur an `localhost` und spricht HTTP. Wird er v
 | `connected: false` in `/api/machines`     | Server nicht erreichbar. Endpoint prüfen. Der Client versucht es alle 10 s erneut (siehe Log). |
 | Keine Nachrichten trotz Verbindung        | `NodeId` prüfen (Namespace-Index, Schreibweise). Es werden nur Wertänderungen gespeichert.     |
 | Nachricht steht auf `Failed`              | Fehlertext in `error` der Nachricht, dann über `/retry` erneut einplanen.                      |
+| Dienst startet nicht (Grenzwerte)         | `Opc:Machines[].Nodes[].Limits` ungültig (`Low` >= `High`). Die Meldung nennt Maschine und Variable. |
+| 429 bei MCP-Aufrufen                      | `RateLimit:McpRequestsPerMinute` überschritten: `Retry-After` abwarten oder Grenze erhöhen.    |
 | Port belegt                               | `Urls` in `appsettings.json` ändern.                                                           |
 | 401 bei jedem Aufruf                      | Header `X-Api-Key` fehlt oder der Key passt nicht zum konfigurierten Hash. Im Development: `dev-reader-key`. |
 | Dienst startet nicht (Optionsfehler)      | `Authentication:ApiKeys` fehlt oder ist ungültig (Name, 64-stelliger Hash, Rolle). Meldung im Log lesen. |

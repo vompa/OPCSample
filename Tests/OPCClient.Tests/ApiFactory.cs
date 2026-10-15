@@ -6,13 +6,14 @@ using OPCClient.Security;
 namespace OPCClient.Tests;
 
 /// <summary>
-/// Startet den echten Dienst im Speicher: eigene SQLite-Datei, zwei Test-Keys und ein unerreichbarer OPC-Endpoint
-/// (Port 1), damit die konfigurierte Maschine "Presse-1" deterministisch nicht verbunden ist.
+/// Startet den echten Dienst im Speicher: eigene SQLite-Datei, zwei Test-Keys und unerreichbare OPC-Endpoints
+/// (Port 1), damit die konfigurierten Maschinen "Presse-1" und "Drehbank-2" deterministisch nicht verbunden sind.
 /// </summary>
 public sealed class ApiFactory : WebApplicationFactory<Program>
 {
     public const string ReaderKey = "test-reader-key-0123456789";
     public const string WriterKey = "test-writer-key-0123456789";
+    private const string UnreachableEndpoint = "opc.tcp://127.0.0.1:1";
 
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"opc-api-{Guid.NewGuid():N}.db");
 
@@ -20,7 +21,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("Database:Path", _dbPath);
-        builder.UseSetting("Opc:Machines:0:Endpoint", "opc.tcp://127.0.0.1:1");
+        builder.UseSetting("Opc:Machines:0:Endpoint", UnreachableEndpoint);
+        builder.UseSetting("Opc:Machines:1:Endpoint", UnreachableEndpoint);
         builder.UseSetting("Authentication:ApiKeys:0:Name", "test-reader");
         builder.UseSetting("Authentication:ApiKeys:0:KeySha256", ApiKeyHasher.Hash(ReaderKey));
         builder.UseSetting("Authentication:ApiKeys:0:Role", Roles.Reader);

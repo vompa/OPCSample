@@ -37,6 +37,9 @@ public sealed class OpcMachine : IAsyncDisposable
     /// <summary>Handler für jede Nachricht (neueste zuerst). Das Token muss weitergereicht werden.</summary>
     public Func<OpcMessage, CancellationToken, Task>? OnMessage { get; set; }
 
+    /// <summary>Prüft jeden gespeicherten Wert gegen die Grenzwerte (optional).</summary>
+    public AlarmMonitor? Alarms { get; set; }
+
     public TimeSpan HandlerTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>Wartezeit vor dem nächsten Versuch (Parameter: Nummer des fehlgeschlagenen Versuchs).</summary>
@@ -193,7 +196,17 @@ public sealed class OpcMachine : IAsyncDisposable
         catch (Exception ex)
         {
             _log.Error(ex, "Speichern fehlgeschlagen: {Name}", msg.Name);
+            return;
         }
+
+        EvaluateAlarms(msg);
+    }
+
+    /// <summary>Ein Fehler in der Alarmprüfung darf weder die Verarbeitung noch den Rx-Stream stoppen.</summary>
+    private void EvaluateAlarms(OpcMessage msg)
+    {
+        try { Alarms?.Evaluate(msg); }
+        catch (Exception ex) { _log.Error(ex, "Alarmprüfung fehlgeschlagen: {Name}", msg.Name); }
     }
 
     private async Task ProcessLoop()
