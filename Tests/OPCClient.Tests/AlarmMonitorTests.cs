@@ -242,7 +242,7 @@ public sealed class AlarmMonitorTests : IDisposable
     public void Limits_are_bound_from_configuration_and_shipped_settings_define_both_machines()
     {
         var config = new ConfigurationBuilder()
-            .AddJsonFile(Path.Combine(AppContext.BaseDirectory, "appsettings.json"), optional: false)
+            .AddJsonFile(Path.Combine(AppContext.BaseDirectory, "client-appsettings.json"), optional: false)
             .Build();
 
         var machines = config.GetSection("Opc:Machines").Get<List<MachineConfig>>()!;

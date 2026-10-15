@@ -40,7 +40,7 @@ public class MachineConfigTests
     {
         // Schutz gegen versehentliches Zurückdrehen des sicheren Standards
         var config = new ConfigurationBuilder()
-            .AddJsonFile(Path.Combine(AppContext.BaseDirectory, "appsettings.json"), optional: false)
+            .AddJsonFile(Path.Combine(AppContext.BaseDirectory, "client-appsettings.json"), optional: false)
             .Build();
 
         Assert.False(config.GetValue<bool>("Opc:AutoAcceptUntrustedCertificates"));

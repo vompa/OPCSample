@@ -16,6 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Eindeutiger Name: Client und Simulator bringen beide eine appsettings.json in den Ausgabeordner mit -->
+    <None Include="..\..\Client\OPCClient\appsettings.json" Link="client-appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
     <ProjectReference Include="..\..\Client\OPCClient\OPCClient.csproj" />
     <ProjectReference Include="..\..\Server\OPCSimulator\OPCSimulator.csproj" />
