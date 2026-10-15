@@ -43,10 +43,19 @@ public static class OpcSessionFactory
 
         await config.ValidateAsync(ApplicationType.Client, ct);
 
-        // Abgelehnte Server-Zertifikate nachvollziehbar loggen, statt nur mit einem Verbindungsfehler zu scheitern
+        // Sobald dieser Handler registriert ist, entscheidet er allein; AutoAccept muss daher hier umgesetzt werden.
+        // Abgelehnte Server-Zertifikate nachvollziehbar loggen, statt nur mit einem Verbindungsfehler zu scheitern.
         config.CertificateValidator.CertificateValidation += (_, e) =>
         {
             if (e.Accept) return;
+            if (autoAcceptUntrustedCertificates && e.Error.StatusCode == global::Opc.Ua.StatusCodes.BadCertificateUntrusted)
+            {
+                e.Accept = true;
+                Log.ForContext("Machine", applicationName).Warning(
+                    "Nicht vertrauenswürdiges OPC-Serverzertifikat automatisch akzeptiert ({Subject}, {Thumbprint}). Nur für Tests geeignet.",
+                    e.Certificate.Subject, e.Certificate.Thumbprint);
+                return;
+            }
             Log.ForContext("Machine", applicationName).Warning(
                 "OPC-Serverzertifikat abgelehnt ({Subject}, {Thumbprint}): {Reason}. Nach Prüfung in pki/trusted/certs ablegen.",
                 e.Certificate.Subject, e.Certificate.Thumbprint, e.Error.StatusCode);
