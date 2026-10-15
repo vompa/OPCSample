@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi;
 using OPCClient.Security;
 using OPCClient.Api;
 using OPCClient.Opc;
@@ -99,9 +99,9 @@ try
             Name = ApiKeyDefaults.HeaderName,
             Description = "API-Key (Development: dev-reader-key bzw. dev-writer-key)"
         });
-        o.AddSecurityRequirement(new OpenApiSecurityRequirement
+        o.AddSecurityRequirement(document => new OpenApiSecurityRequirement
         {
-            [new OpenApiSecurityScheme { Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "ApiKey" } }] = []
+            [new OpenApiSecuritySchemeReference("ApiKey", document)] = []
         });
     });
 
